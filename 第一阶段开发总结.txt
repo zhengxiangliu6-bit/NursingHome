@@ -1,0 +1,225 @@
+========================================
+  养老院管理系统 - 第一阶段开发总结
+  "数字孪生基础" (Digital Twin Foundation)
+========================================
+
+
+一、技术架构
+────────────────────────────────────────
+后端: Django 4.2 + Django REST Framework + SQLite (开发) / PostgreSQL (生产)
+前端: Vue 3 + Element Plus + Pinia + Axios + ECharts
+认证: JWT (simplejwt)，6种角色 (超级管理员、管理员、医生、护士、护工、家属)
+基础模型: BaseModel (UUID主键、软删除 is_deleted、created_at、updated_at)
+
+
+二、已有基础模块 (第一阶段之前)
+────────────────────────────────────────
+- 用户认证与角色管理 (accounts)
+- 老人基本信息管理 (residents)
+- 房间与床位管理 (residents)
+- 护理等级定义 (residents)
+- 护理评估记录 (residents)
+- 生命体征监测 (smart_detection)
+- 呼叫响应系统 (call_response)
+- 智能检测 (smart_detection)
+- 巡更管理 (patrol)
+- 公共广播 (broadcast)
+- 院区管理 - 楼栋/区域/设备/公告 (campus)
+- 综合看板 (dashboard)
+
+
+三、第一阶段新增功能
+────────────────────────────────────────
+
+1. 床位状态扩展
+   - 原状态: available(空闲)、occupied(已占用)
+   - 新增状态: leave(请假)、reserved(预留)、maintenance(维护中)、cleaning(清洁中)
+   - 共6种状态，覆盖床位全生命周期
+
+2. 床位状态图 (BedMap)
+   - 页面: frontend/src/views/residents/BedMap.vue
+   - API: GET /api/v1/beds/map/
+   - 按 楼栋 -> 楼层 -> 房间 -> 床位 层级展示所有床位实时状态
+   - 不同状态以不同颜色标签区分，直观掌握全院床位分布
+
+3. 入住退住流程 (AdmissionProcess)
+   - 页面: frontend/src/views/residents/AdmissionProcess.vue
+   - 模型: AdmissionApplication (咨询 -> 评估 -> 签约 -> 已完成 四阶段状态机)
+   - API: /api/v1/admission-applications/
+   - 支持操作: 推进(advance)、拒绝(reject)、撤销(withdraw)、办理入住(admit)、办理退住(discharge)
+   - 签约阶段可预留床位，办理入住时填写身份证号并分配床位/护理等级/责任护士
+   - 已完成阶段可办理退住，退住后释放床位(进入清洁中状态)
+   - 支持删除已完成/已拒绝/已撤销的记录
+   - 操作按钮使用 flex-wrap 布局，自适应排列
+
+4. 老人请假流程 (ResidentLeave)
+   - 模型: ResidentLeave (on_leave/returned/cancelled)
+   - API: POST /residents/{id}/start_leave/、POST /residents/{id}/end_leave/、GET /residents/{id}/leaves/
+   - 在老人详情页一键请假/销假
+   - 请假期间床位标记为"请假"状态，保留床位不释放
+   - 销假后床位自动恢复为"已占用"
+   - 请假记录在老人详情页独立 Tab 展示
+
+5. 床位调换申请 (BedTransfer)
+   - 页面: frontend/src/views/residents/BedTransfer.vue
+   - 模型: BedTransfer (pending/approved/rejected/cancelled)
+   - API: /api/v1/bed-transfers/
+   - 支持两种场景:
+     * 调换: 老人换到空闲床位
+     * 互换: 两个老人交换床位
+   - 申请 -> 审批 -> 自动执行的完整工作流
+   - 互换使用 transaction.atomic 原子操作，临时置 NULL 绕过 OneToOne 唯一约束
+   - 支持操作: 通过(approve)、拒绝(reject，可填原因)、取消(cancel)、删除(delete)
+   - 状态筛选: 全部/待审批/已通过/已拒绝/已取消
+
+6. 员工排班管理 (StaffSchedule)
+   - 页面: frontend/src/views/accounts/StaffSchedule.vue
+   - 模型: StaffSchedule
+   - API: GET /api/v1/auth/schedules/ (支持 date_from/date_to 范围参数)
+   - 支持早班/午班/夜班排班
+
+7. 员工管理增强 (StaffManage)
+   - 页面: frontend/src/views/accounts/StaffManage.vue
+   - 员工列表与管理
+
+8. 老人详情增强 (ResidentDetail)
+   - 新增照片上传功能
+   - 护理等级、床位选择
+   - 家属联系人 Tab (添加/移除家属关联)
+   - 请假记录 Tab (展示请假历史)
+   - 退住流程 (退住后记录最后床位号 last_bed_info)
+   - 保存/退住后自动返回老人列表页面
+
+9. 房间管理增强 (RoomManage)
+   - 支持编辑/删除房间
+   - 房间内床位管理 (增删)
+
+
+四、关键技术实现
+────────────────────────────────────────
+
+1. 软删除
+   - 所有删除操作均为 is_deleted = True，查询时自动过滤 filter(is_deleted=False)
+   - 避免数据丢失，支持数据恢复
+
+2. 床位状态联动
+   - 入住时: 床位 -> occupied
+   - 退住时: 床位 -> cleaning，记录 last_bed_info
+   - 请假时: 床位 -> leave (保留关系)
+   - 销假时: 床位 -> occupied (恢复)
+   - 调换时: 原子操作交换/移动床位
+
+3. __str__ on None 防护
+   - 所有 CharField(source='xxx.__str__') 改为 SerializerMethodField
+   - 关联对象为空时返回 None 而非报错或显示乱码
+   - 涉及: bed_info、reserved_bed_info
+
+4. last_bed_info 字段
+   - Resident 模型新增 last_bed_info CharField
+   - 退住时保存最后床位号 (如 "201-1")
+   - 老人列表中退住老人仍可显示其历史床位
+
+5. 路由注意事项
+   - residents/rooms、residents/bed-map、residents/admission、residents/bed-transfer
+     必须放在 residents/:id 之前，避免路由冲突
+
+
+五、数据模型汇总
+────────────────────────────────────────
+
+accounts 模块:
+  - User (用户)
+  - Role (角色)
+  - StaffProfile (员工档案)
+  - FamilyRelation (家属关系)
+  - StaffSchedule (员工排班) [第一阶段新增]
+
+residents 模块:
+  - CareLevel (护理等级)
+  - Resident (老人信息，含 last_bed_info)
+  - CareAssessment (护理评估)
+  - Room (房间)
+  - Bed (床位，6种状态)
+  - AdmissionApplication (入住申请) [第一阶段新增]
+  - ResidentLeave (请假记录) [第一阶段新增]
+  - BedTransfer (床位调换申请) [第一阶段新增]
+
+campus 模块:
+  - Building (楼栋)
+  - Area (区域)
+  - Device (设备)
+  - Notice (公告)
+
+
+六、API 路由汇总
+────────────────────────────────────────
+
+认证相关:
+  /api/v1/auth/*
+
+老人管理:
+  /api/v1/residents/                    老人 CRUD
+  /api/v1/residents/{id}/discharge/     办理退住
+  /api/v1/residents/{id}/start_leave/   办理请假
+  /api/v1/residents/{id}/end_leave/     办理销假
+  /api/v1/residents/{id}/leaves/        请假记录
+  /api/v1/residents/{id}/assessments/   护理评估
+
+入住流程:
+  /api/v1/admission-applications/              入住申请 CRUD
+  /api/v1/admission-applications/{id}/advance/ 推进阶段
+  /api/v1/admission-applications/{id}/reject/  拒绝
+  /api/v1/admission-applications/{id}/admit/   办理入住
+  /api/v1/admission-applications/{id}/discharge/ 办理退住
+
+床位相关:
+  /api/v1/beds/                         床位 CRUD
+  /api/v1/beds/map/                     床位状态图
+  /api/v1/bed-transfers/                床位调换 CRUD
+  /api/v1/bed-transfers/{id}/approve/   通过调换
+  /api/v1/bed-transfers/{id}/reject/    拒绝调换
+  /api/v1/bed-transfers/{id}/cancel/    取消调换
+
+排班相关:
+  /api/v1/auth/schedules/               排班查询 (支持 date_from/date_to)
+
+院区管理:
+  /api/v1/buildings/                    楼栋
+  /api/v1/rooms/                        房间
+  /api/v1/care-levels/                  护理等级
+
+
+七、前端页面汇总
+────────────────────────────────────────
+
+老人管理:
+  /residents              老人列表 (ResidentList.vue)
+  /residents/new          新增老人 (ResidentDetail.vue)
+  /residents/:id          老人详情/编辑 (ResidentDetail.vue)
+  /residents/rooms        房间管理 (RoomManage.vue)
+  /residents/bed-map      床位状态图 (BedMap.vue)
+  /residents/admission    入住退住流程 (AdmissionProcess.vue)
+  /residents/bed-transfer 床位调换 (BedTransfer.vue)
+
+员工管理:
+  /staff                  员工管理 (StaffManage.vue)
+  /staff/schedule         员工排班 (StaffSchedule.vue)
+
+
+八、权限控制
+────────────────────────────────────────
+
+权限类 (backend/apps/common/permissions.py):
+  - IsAdmin: 仅管理员
+  - IsDoctor: 仅医生
+  - IsNurseOrAbove: 护士及以上
+  - IsStaff: 所有员工
+  - IsFamilyMember: 家属
+
+大部分操作要求 IsNurseOrAbove 权限
+
+
+========================================
+  第一阶段开发完成
+  下一阶段待规划...
+========================================

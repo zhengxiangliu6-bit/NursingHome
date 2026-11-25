@@ -1,0 +1,14 @@
+# 1. 后端迁移
+cd backend
+python manage.py makemigrations
+python manage.py migrate
+
+# 2. 启动服务（需要4个终端）
+python manage.py runserver          # Django
+celery -A config worker -l info     # Celery Worker
+celery -A config beat -l info       # Celery Beat（设备离线检测）
+python manage.py mqtt_gateway       # MQTT网关（需EMQX运行时）
+
+# 3. 前端
+cd frontend
+npm run dev
